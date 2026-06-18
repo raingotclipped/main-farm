@@ -1,0 +1,716 @@
+--==============================================================
+-- PRACTICE PANEL - WindUI Edition (v1.8.3)
+-- + Teleport-on-Spawn feature
+--==============================================================
+local ok, w = pcall(function()
+    return loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+end)
+if not ok or not w then
+    local ok2, w2 = pcall(function()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/Source.lua"))()
+    end)
+    if ok2 and w2 then
+        w = w2
+    else
+        error("[Practice] Failed to load WindUI from both sources.")
+    end
+end
+
+local pl = game:GetService("Players")
+local rn = game:GetService("RunService")
+local rp = game:GetService("ReplicatedStorage")
+local ws = game:GetService("Workspace")
+local vu = game:GetService("VirtualUser")
+local hs = game:GetService("HttpService")
+local lp = pl.LocalPlayer
+
+-- ============================================================
+-- STATE
+-- ============================================================
+local a1 = true
+local ar = true
+local rt = 1.0
+local hm = "Kill Signal"
+local instantPin = true
+
+-- Pin echo tracking
+local pinning      = false
+local stableAtOne  = false
+local pinTimeout   = 0.2
+local pinToken     = 0
+local sc           = false
+
+-- Teleport-on-Spawn
+local tpOnSpawn    = false
+local tpX          = -21.608
+local tpY          = -61.689
+local tpZ          = -251.675
+local tpDelay      = 0.5  -- seconds after spawn before TP attempt
+
+local ds = { enabled = false, loc = CFrame.new() }
+local killTarget = nil
+
+-- Safe, non-blocking remote resolution
+local rst
+task.spawn(function()
+    while not rst do
+        pcall(function()
+            rst = rp.Knit.Knit.Services.JoinService.RE.Reset
+        end)
+        task.wait(0.5)
+    end
+end)
+
+----------------------------------------------------------------
+-- HOOKS
+----------------------------------------------------------------
+local oi
+oi = hookmetamethod(game, "__index", newcclosure(function(self, k)
+    if ds.enabled and not checkcaller() and k == "CFrame" then
+        local c = lp.Character
+        if c then
+            local hrp = c:FindFirstChild("HumanoidRootPart")
+            if hrp and self == hrp then
+                return ds.loc
+            end
+        end
+    end
+    return oi(self, k)
+end))
+
+local function gc()
+    local c = lp.Character
+    if c and c.Parent then return c end
+    local f = ws:FindFirstChild("Characters")
+    return f and f:FindFirstChild(lp.Name)
+end
+
+local ncc = nil
+local cm = {}
+
+local function ncf(dur)
+    if ncc then ncc:Disconnect() ncc = nil end
+    cm = {}
+    local function step()
+        local c = gc()
+        if not c then return end
+        for _, p in ipairs(c:GetDescendants()) do
+            if p:IsA("BasePart") then
+                if cm[p] == nil then cm[p] = p.CanCollide end
+                p.CanCollide = false
+            end
+        end
+    end
+    step()
+    ncc = rn.Stepped:Connect(step)
+    task.delay(dur, function()
+        if ncc then ncc:Disconnect() ncc = nil end
+        local c = gc()
+        if c then
+            for p, old in pairs(cm) do
+                if p and p.Parent then p.CanCollide = old end
+            end
+        end
+        cm = {}
+    end)
+end
+
+local function rc()
+    if ncc then ncc:Disconnect() ncc = nil end
+    cm = {}
+end
+
+local hb
+
+local function de()
+    if ds.enabled then return end
+    local c = gc()
+    if not c then return end
+    local r = c:FindFirstChild("HumanoidRootPart")
+    local h = c:FindFirstChildOfClass("Humanoid")
+    if not r or not h then return end
+
+    pinning     = false
+    stableAtOne = false
+
+    ncf(5)
+    ds.enabled = true
+    ds.loc = r.CFrame
+
+    pcall(function() replicatesignal(h.ServerBreakJoints) end)
+    if rst then pcall(function() rst:FireServer() end) end
+
+    if hb then hb:Disconnect() hb = nil end
+    hb = rn.Heartbeat:Connect(function()
+        if not ds.enabled then
+            if hb then hb:Disconnect() hb = nil end
+            return
+        end
+        local char = gc()
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root and root.Parent then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            root.CFrame = CFrame.new(0, 10000, 0)
+        end
+    end)
+
+    task.delay(0.5, function()
+        ds.enabled = false
+        if hb then hb:Disconnect() hb = nil end
+    end)
+end
+
+local oldNc
+oldNc = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    if not checkcaller() and self == rst and (method == "FireServer" or method == "fireServer") then
+        if ar and not pinning and not sc then
+            if hb then hb:Disconnect() hb = nil end
+            ds.enabled = false
+            task.spawn(de)
+        end
+    end
+    return oldNc(self, ...)
+end))
+
+----------------------------------------------------------------
+-- LOGIC
+----------------------------------------------------------------
+local function s1()
+    local c = gc()
+    if not c then return end
+    local h = c:FindFirstChildOfClass("Humanoid")
+    if not h then return end
+    if h.Health <= 1.01 then return end
+
+    pinning     = true
+    stableAtOne = false
+    pinToken    = pinToken + 1
+    local myToken = pinToken
+
+    pcall(function()
+        if hm == "ChangeState" then
+            h:ChangeState(Enum.HumanoidStateType.Dead)
+        elseif hm == "Kill Signal" then
+            local sig = replicatesignal or replicate_signal
+            if sig and killTarget then
+                sig(killTarget)
+            else
+                h:ChangeState(Enum.HumanoidStateType.Dead)
+            end
+        end
+    end)
+
+    task.delay(pinTimeout, function()
+        if myToken == pinToken and pinning then
+            pinning     = false
+            stableAtOne = true
+        end
+    end)
+end
+
+local function fr()
+    pinning     = false
+    stableAtOne = false
+    task.spawn(de)
+end
+
+-- ============================================================
+-- TELEPORT-ON-SPAWN
+-- ============================================================
+local function tryTPOnSpawn(char)
+    if not tpOnSpawn then return end
+    local hrp = char:WaitForChild("HumanoidRootPart", 5)
+    if not hrp then return end
+
+    -- Wait a brief moment for spawn physics to settle
+    task.wait(tpDelay)
+    if not hrp or not hrp.Parent then return end
+
+    local target = CFrame.new(tpX, tpY, tpZ)
+    pcall(function()
+        hrp.AssemblyLinearVelocity  = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+        hrp.CFrame = target
+    end)
+end
+
+-- ============================================================
+-- LOOP — safety-net pin
+-- ============================================================
+task.spawn(function()
+    while true do
+        task.wait(rt)
+        if a1 and not pinning and not sc and not ds.enabled then
+            local c = gc()
+            local h = c and c:FindFirstChildOfClass("Humanoid")
+            if h and h.Parent and h.Health > 1.01 then
+                s1()
+            end
+        end
+    end
+end)
+
+local function bd(char)
+    rc()
+    sc          = true
+    pinning     = false
+    stableAtOne = false
+
+    pcall(function()
+        if lp:FindFirstChild("kill") then
+            killTarget = lp.kill
+        elseif lp.kill then
+            killTarget = lp.kill
+        end
+    end)
+
+    local hrp = char:WaitForChild("HumanoidRootPart", 5)
+    if hrp then
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+        if ds.enabled then
+            hrp.CFrame = ds.loc
+            task.spawn(function()
+                for i = 1, 5 do
+                    rn.Heartbeat:Wait()
+                    if hrp and hrp.Parent then
+                        hrp.AssemblyLinearVelocity = Vector3.zero
+                        hrp.AssemblyAngularVelocity = Vector3.zero
+                        hrp.CFrame = ds.loc
+                    end
+                end
+            end)
+        end
+    end
+
+    task.delay(0.6, function() sc = false end)
+
+    -- Fire teleport-on-spawn (separate task so it doesn't block humanoid setup)
+    task.spawn(tryTPOnSpawn, char)
+
+    local hum = char:WaitForChild("Humanoid", 5)
+    if hum then
+        local lastHP = hum.Health
+
+        hum.Died:Connect(function()
+            if not ar then return end
+            if sc then return end
+            if ds.enabled then return end
+            if pinning then return end
+            task.spawn(de)
+        end)
+
+        hum.HealthChanged:Connect(function(hp)
+            if ds.enabled then return end
+            if sc then return end
+
+            if pinning then
+                if hp > 0.5 and hp < 2 then
+                    pinning     = false
+                    stableAtOne = true
+                end
+                lastHP = hp
+                return
+            end
+
+            if ar and hp <= 0 then
+                stableAtOne = false
+                task.spawn(de)
+                lastHP = hp
+                return
+            end
+
+            if ar and stableAtOne and lastHP > 0 and hp < lastHP and hp <= 0.5 then
+                stableAtOne = false
+                task.spawn(de)
+                lastHP = hp
+                return
+            end
+
+            if a1 and instantPin and hp > 1.01 then
+                s1()
+            end
+
+            lastHP = hp
+        end)
+    end
+
+    task.spawn(function()
+        local regen = char:WaitForChild("Health", 5)
+        if regen and regen:IsA("Script") then regen.Disabled = true end
+    end)
+end
+
+lp.CharacterAdded:Connect(bd)
+if lp.Character then
+    task.spawn(bd, lp.Character)
+end
+
+lp.Idled:Connect(function()
+    pcall(function()
+        vu:CaptureController()
+        vu:ClickButton2(Vector2.new())
+    end)
+end)
+
+----------------------------------------------------------------
+-- CONFIGURATION SYSTEM
+----------------------------------------------------------------
+local ac = ""
+local tc = ""
+local UI = {}
+
+pcall(function()
+    if makefolder then
+        makefolder("PRACTICE_PANEL")
+        makefolder("PRACTICE_PANEL/Configs")
+    end
+end)
+
+local function getConfigs()
+    local list = {}
+    if listfiles then
+        local files = listfiles("PRACTICE_PANEL/Configs")
+        for _, file in ipairs(files) do
+            local name = file:match("([^/\\]+)%.json$")
+            if name then table.insert(list, name) end
+        end
+    end
+    return list
+end
+
+local function setVal(el, val)
+    if not el then return end
+    if el.SetValue then pcall(function() el:SetValue(val) end)
+    elseif el.Set then pcall(function() el:Set(val) end) end
+end
+
+local function refreshDropdown(el, list)
+    if not el then return end
+    if el.Refresh then pcall(function() el:Refresh(list) end)
+    elseif el.SetValues then pcall(function() el:SetValues(list) end) end
+end
+
+local function updateUIElements()
+    setVal(UI.Auto1HP, a1)
+    setVal(UI.AutoReset, ar)
+    setVal(UI.LoopDelay, rt)
+    setVal(UI.HPMethod, hm)
+    setVal(UI.PinTimeout, pinTimeout)
+    setVal(UI.InstantPin, instantPin)
+    setVal(UI.TPOnSpawn, tpOnSpawn)
+    setVal(UI.TPX, tostring(tpX))
+    setVal(UI.TPY, tostring(tpY))
+    setVal(UI.TPZ, tostring(tpZ))
+    setVal(UI.TPDelay, tpDelay)
+end
+
+local function saveConfig(name)
+    if not name or name == "" then return end
+    local data = {
+        Auto1HP    = a1,
+        AutoReset  = ar,
+        LoopDelay  = rt,
+        HPMethod   = hm,
+        PinTimeout = pinTimeout,
+        InstantPin = instantPin,
+        TPOnSpawn  = tpOnSpawn,
+        TPX        = tpX,
+        TPY        = tpY,
+        TPZ        = tpZ,
+        TPDelay    = tpDelay,
+    }
+    local success, str = pcall(function() return hs:JSONEncode(data) end)
+    if success and writefile then
+        writefile("PRACTICE_PANEL/Configs/" .. name .. ".json", str)
+    end
+end
+
+local function loadConfig(name)
+    if not name or name == "" then return end
+    local path = "PRACTICE_PANEL/Configs/" .. name .. ".json"
+    if isfile and isfile(path) and readfile then
+        local str = readfile(path)
+        local success, data = pcall(function() return hs:JSONDecode(str) end)
+        if success and type(data) == "table" then
+            if data.Auto1HP    ~= nil then a1 = data.Auto1HP end
+            if data.AutoReset  ~= nil then ar = data.AutoReset end
+            if data.LoopDelay  ~= nil then rt = data.LoopDelay end
+            if data.HPMethod   ~= nil then hm = data.HPMethod end
+            if data.PinTimeout ~= nil then pinTimeout = data.PinTimeout end
+            if data.InstantPin ~= nil then instantPin = data.InstantPin end
+            if data.TPOnSpawn  ~= nil then tpOnSpawn = data.TPOnSpawn end
+            if data.TPX        ~= nil then tpX = tonumber(data.TPX) or tpX end
+            if data.TPY        ~= nil then tpY = tonumber(data.TPY) or tpY end
+            if data.TPZ        ~= nil then tpZ = tonumber(data.TPZ) or tpZ end
+            if data.TPDelay    ~= nil then tpDelay = tonumber(data.TPDelay) or tpDelay end
+            updateUIElements()
+        end
+    end
+end
+
+local function deleteConfig(name)
+    if not name or name == "" then return end
+    local path = "PRACTICE_PANEL/Configs/" .. name .. ".json"
+    if delfile and isfile and isfile(path) then delfile(path) end
+end
+
+----------------------------------------------------------------
+-- WIND UI BUILD
+----------------------------------------------------------------
+local Window = w:CreateWindow({
+    Title        = "PRACTICE PANEL",
+    Icon         = "activity",
+    Author       = "RAIN",
+    Folder       = "PRACTICE_PANEL",
+    Size         = UDim2.fromOffset(450, 510),
+    Transparent  = true,
+    Theme        = "Dark",
+    SideBarWidth = 140,
+})
+
+local MainTab = Window:Tab({ Title = "Main", Icon = "home" })
+
+MainTab:Section({ Title = "Manual Actions" })
+
+MainTab:Button({
+    Title = "Set 1HP (Manual)",
+    Desc  = "Forces health to 1 HP using selected method",
+    Callback = s1,
+})
+
+MainTab:Button({
+    Title = "Force Reset / Respawn",
+    Desc  = "Triggers instant respawn sequence",
+    Callback = function()
+        local prev = ar
+        ar = true
+        fr()
+        task.delay(0.4, function() ar = prev end)
+    end,
+})
+
+MainTab:Section({ Title = "Automations" })
+
+UI.Auto1HP = MainTab:Toggle({
+    Title   = "Auto-1HP Loop",
+    Desc    = "Continuously locks health to 1 HP",
+    Default = true,
+    Callback = function(v) a1 = v end,
+})
+
+UI.InstantPin = MainTab:Toggle({
+    Title   = "Instant Pin (event-driven)",
+    Desc    = "Pin the moment HP rises above 1",
+    Default = true,
+    Callback = function(v) instantPin = v end,
+})
+
+UI.HPMethod = MainTab:Dropdown({
+    Title  = "1HP Method",
+    Values = {"ChangeState", "Kill Signal"},
+    Default = "Kill Signal",
+    Callback = function(v) hm = v end,
+})
+
+UI.AutoReset = MainTab:Toggle({
+    Title   = "Auto-Reset on Hit",
+    Desc    = "Triggers instant respawn when truly damaged",
+    Default = true,
+    Callback = function(v) ar = v end,
+})
+
+UI.LoopDelay = MainTab:Slider({
+    Title    = "Loop Delay (seconds)",
+    Desc     = "Safety-net poll rate",
+    Step     = 0.05,
+    Value    = { Min = 0.1, Max = 5.0, Default = 1.0 },
+    Callback = function(v) rt = tonumber(v) or rt end,
+})
+
+UI.PinTimeout = MainTab:Slider({
+    Title    = "Pin Echo Timeout (s)",
+    Desc     = "Max time to wait for pin to settle",
+    Step     = 0.05,
+    Value    = { Min = 0.1, Max = 2.0, Default = 0.2 },
+    Callback = function(v) pinTimeout = tonumber(v) or pinTimeout end,
+})
+
+----------------------------------------------------------------
+-- TELEPORT TAB
+----------------------------------------------------------------
+local TPTab = Window:Tab({ Title = "Teleport", Icon = "map-pin" })
+
+TPTab:Section({ Title = "Teleport on Spawn" })
+
+UI.TPOnSpawn = TPTab:Toggle({
+    Title   = "Enable TP on Spawn",
+    Desc    = "Teleport once to coordinates after each spawn",
+    Default = false,
+    Callback = function(v) tpOnSpawn = v end,
+})
+
+UI.TPX = TPTab:Input({
+    Title       = "X",
+    Placeholder = "-21.608",
+    Value       = tostring(tpX),
+    Callback    = function(v)
+        local n = tonumber(v)
+        if n then tpX = n end
+    end,
+})
+
+UI.TPY = TPTab:Input({
+    Title       = "Y",
+    Placeholder = "-61.689",
+    Value       = tostring(tpY),
+    Callback    = function(v)
+        local n = tonumber(v)
+        if n then tpY = n end
+    end,
+})
+
+UI.TPZ = TPTab:Input({
+    Title       = "Z",
+    Placeholder = "-251.675",
+    Value       = tostring(tpZ),
+    Callback    = function(v)
+        local n = tonumber(v)
+        if n then tpZ = n end
+    end,
+})
+
+UI.TPDelay = TPTab:Slider({
+    Title    = "TP Delay After Spawn (s)",
+    Desc     = "How long to wait after spawning before teleporting",
+    Step     = 0.05,
+    Value    = { Min = 0.0, Max = 3.0, Default = 0.5 },
+    Callback = function(v) tpDelay = tonumber(v) or tpDelay end,
+})
+
+TPTab:Section({ Title = "Manual" })
+
+TPTab:Button({
+    Title = "Teleport Now",
+    Desc  = "Instantly teleport to the saved coordinates",
+    Callback = function()
+        local c = gc()
+        local hrp = c and c:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            pcall(function()
+                hrp.AssemblyLinearVelocity  = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+                hrp.CFrame = CFrame.new(tpX, tpY, tpZ)
+            end)
+        end
+    end,
+})
+
+TPTab:Button({
+    Title = "Set From Current Position",
+    Desc  = "Capture your current X/Y/Z into the fields",
+    Callback = function()
+        local c = gc()
+        local hrp = c and c:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local p = hrp.Position
+            tpX = math.floor(p.X * 1000 + 0.5) / 1000
+            tpY = math.floor(p.Y * 1000 + 0.5) / 1000
+            tpZ = math.floor(p.Z * 1000 + 0.5) / 1000
+            setVal(UI.TPX, tostring(tpX))
+            setVal(UI.TPY, tostring(tpY))
+            setVal(UI.TPZ, tostring(tpZ))
+        end
+    end,
+})
+
+----------------------------------------------------------------
+-- CONFIGS TAB
+----------------------------------------------------------------
+local ConfigTab = Window:Tab({ Title = "Configs", Icon = "settings" })
+
+ConfigTab:Section({ Title = "Manage Configurations" })
+
+local cd
+
+ConfigTab:Input({
+    Title = "Config Name",
+    Placeholder = "Enter name here...",
+    Callback = function(v) tc = v end,
+})
+
+cd = ConfigTab:Dropdown({
+    Title = "Select Config",
+    Values = getConfigs(),
+    Default = "",
+    Callback = function(v) ac = v end,
+})
+
+ConfigTab:Button({
+    Title = "Save Config",
+    Callback = function()
+        if tc ~= "" then
+            saveConfig(tc)
+            refreshDropdown(cd, getConfigs())
+        end
+    end,
+})
+
+ConfigTab:Button({
+    Title = "Overwrite Config",
+    Callback = function()
+        if ac ~= "" then saveConfig(ac) end
+    end,
+})
+
+ConfigTab:Button({
+    Title = "Load Config",
+    Callback = function()
+        if ac ~= "" then loadConfig(ac) end
+    end,
+})
+
+ConfigTab:Button({
+    Title = "Delete Config",
+    Callback = function()
+        if ac ~= "" then
+            deleteConfig(ac)
+            ac = ""
+            refreshDropdown(cd, getConfigs())
+        end
+    end,
+})
+
+ConfigTab:Section({ Title = "Autoload Settings" })
+
+ConfigTab:Button({
+    Title = "Set as Autoload Config",
+    Callback = function()
+        if ac ~= "" and writefile then
+            writefile("PRACTICE_PANEL/autoload.txt", ac)
+        end
+    end,
+})
+
+ConfigTab:Button({
+    Title = "Clear Autoload Config",
+    Callback = function()
+        if isfile and isfile("PRACTICE_PANEL/autoload.txt") and delfile then
+            delfile("PRACTICE_PANEL/autoload.txt")
+        end
+    end,
+})
+
+----------------------------------------------------------------
+-- AUTOLOAD STARTUP
+----------------------------------------------------------------
+task.spawn(function()
+    if isfile and isfile("PRACTICE_PANEL/autoload.txt") and readfile then
+        local name = readfile("PRACTICE_PANEL/autoload.txt")
+        if name and name ~= "" then loadConfig(name) end
+    end
+end)
+
+print("[Practice] Panel armed v1.8.3 — TP-on-spawn ready.")
