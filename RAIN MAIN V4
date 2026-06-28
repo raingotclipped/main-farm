@@ -1,0 +1,1647 @@
+--==============================================================
+-- RAIN HUB - WindUI Edition (v2.4)
+-- • NEW: Lock On target whitelist (multi-select dropdown)
+-- • NEW: Coordinates tab — TP to default coords on spawn
+--==============================================================
+local w = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+
+local ps   = game:GetService("Players")
+local rs   = game:GetService("RunService")
+local rep  = game:GetService("ReplicatedStorage")
+local us   = game:GetService("UserInputService")
+local vu   = game:GetService("VirtualUser")
+local vm   = game:GetService("VirtualInputManager")
+local st   = game:GetService("Stats")
+local cg   = game:GetService("CoreGui")
+local sg   = game:GetService("StarterGui")
+local lp   = ps.LocalPlayer
+local cam  = workspace.CurrentCamera
+
+----------------------------------------------------------------
+-- REMOTES
+----------------------------------------------------------------
+local g_svc = rep.Knit.Knit.Services.GojoService.RE
+local g_ult = g_svc.Ultimate
+local g_r   = g_svc.RightActivated
+local acCam = rep:WaitForChild("Knit"):WaitForChild("Knit"):WaitForChild("Services"):WaitForChild("AntiCheatService"):WaitForChild("RE"):WaitForChild("Camera")
+local event = rep.Knit.Knit.Services.JoinService.RE.Reset
+
+local naoyaM1 = nil
+task.spawn(function()
+    local tries = 0
+    while not naoyaM1 and tries < 30 do
+        pcall(function()
+            naoyaM1 = rep.Knit.Knit.Services.NaoyaService.RE.Activated
+        end)
+        if naoyaM1 then break end
+        tries = tries + 1
+        task.wait(0.5)
+    end
+end)
+
+----------------------------------------------------------------
+-- STATE
+----------------------------------------------------------------
+local State = {
+    AutoM1        = false,
+    M1Delay       = 0.1,
+    M1Cancel      = false,
+
+    OffsetBehind  = 3,
+    OffsetY       = 0,
+    OffsetUnder   = 3,
+    UnderRot      = 90,
+
+    MultiMode     = "Behind",
+    TargetOrder   = "Proximity",
+    MultiDelay    = 0,
+    MultiTargets  = {},
+    MultiLoop     = false,
+
+    SmartHPThresh = 1,
+    SmartWaitMax  = 10,
+
+    BackCamDist   = 6,
+    BackCamHeight = 2,
+
+    -- Lock On
+    LockOnEnabled    = true,
+    LockOnRange      = 10,
+    LockCamDist      = 8,
+    LockCamHeight    = 3,
+    LockTargets      = {},   -- whitelist (display names); empty = ALL
+
+    -- Face Target (Body Lock — rotation ONLY, no follow)
+    FaceTargetEnabled = true,
+
+    -- Freeze
+    FreezeEnabled = false,
+
+    -- Coordinates
+    CoordX         = -27.02,
+    CoordY         = -61.527,
+    CoordZ         = -251.831,
+    TPOnSpawn      = false,
+}
+
+local wsOn, wsVal, wsConn = false, 16, nil
+local ncOn, ncConn2 = false, nil
+
+-- Invis
+local INVIS_OFF = 100
+local invisOn   = false
+local ft, invisConn, invisTrack, oC0 = nil, nil, nil, nil
+
+local blocked = false
+
+-- Gojo
+local gojoOn, gBusy, lastU = false, false, 0
+
+-- Camera Proxy & Lock
+local camProxy = nil
+local camLockConn = nil
+local currentTarget = nil
+
+-- MULTI-TP STATE
+local multiBusy = false
+
+-- Lock On state
+local lockOnConn = nil
+local lockOnTarget = nil
+local faceConn = nil
+local savedAutoRotate = nil
+
+-- Freeze state
+local freezeLockedCF = nil
+local freezeConn = nil
+
+----------------------------------------------------------------
+-- PING
+----------------------------------------------------------------
+local function getPingMs()
+    local ok, ping = pcall(function()
+        return st.Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    if ok and type(ping) == "number" and ping > 0 then return ping end
+    return 100
+end
+
+----------------------------------------------------------------
+-- INSTANT RESPAWN
+----------------------------------------------------------------
+local dsT = { enabled = false, loc = CFrame.new() }
+local old1
+old1 = hookmetamethod(game, "__index", newcclosure(function(self, key)
+    if key == "CFrame" and dsT.enabled and not checkcaller() then
+        local char = lp.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp and self == hrp then return dsT.loc end
+    end
+    return old1(self, key)
+end))
+
+local ncConn = nil
+local cMap = {}
+local function Noclip(duration)
+    if ncConn then ncConn:Disconnect() ncConn = nil end
+    local function step()
+        local char = lp.Character
+        if not char then return end
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then
+                if cMap[p] == nil then cMap[p] = p.CanCollide end
+                p.CanCollide = false
+            end
+        end
+    end
+    step()
+    ncConn = rs.Stepped:Connect(step)
+    task.delay(duration, function()
+        if ncConn then ncConn:Disconnect() ncConn = nil end
+        local char = lp.Character
+        if char then
+            for part, old in pairs(cMap) do
+                if part and part.Parent then part.CanCollide = old end
+            end
+        end
+        table.clear(cMap)
+    end)
+end
+
+local hbConn
+local function autodie()
+    local char = lp.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char:FindFirstChild("Humanoid")
+    if not root or not humanoid then return end
+    Noclip(5)
+    dsT.enabled = true
+    pcall(function() replicatesignal(humanoid.ServerBreakJoints) end)
+    hbConn = rs.Heartbeat:Connect(function()
+        if not dsT.enabled then
+            if hbConn then hbConn:Disconnect() hbConn = nil end
+            return
+        end
+        local currentChar = lp.Character
+        if not currentChar then return end
+        local currentRoot = currentChar:FindFirstChild("HumanoidRootPart")
+        if currentRoot and currentRoot.Parent then
+            dsT.loc = currentRoot.CFrame
+            currentRoot.CFrame = CFrame.new(0, 10000, 0)
+        end
+    end)
+    task.delay(0.5, function()
+        dsT.enabled = false
+        if hbConn then hbConn:Disconnect() hbConn = nil end
+    end)
+end
+
+local rB = Instance.new("BindableEvent")
+rB.Event:Connect(function() task.spawn(autodie) end)
+task.spawn(function()
+    while not pcall(function() sg:SetCore("ResetButtonCallback", rB) end) do
+        task.wait(1)
+    end
+end)
+
+----------------------------------------------------------------
+-- GOJO KILL ALL
+----------------------------------------------------------------
+getgenv().ez = function()
+    local target = CFrame.new(
+        122.556427, -145.5825043, 200.278061,
+        0.979058027, 0.0212170221, -0.202472657,
+        9.55052148e-10, 0.9945544, 0.10421893,
+        0.203581288, -0.102036379, 0.973726451
+    )
+    local root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+    if root then
+        getgenv().is_blocking = true
+        root.CFrame = target
+        task.wait(1)
+        getgenv().is_blocking = false
+    end
+end
+
+local function wipe()
+    local start = os.clock()
+    while os.clock() - start < 9 do
+        if not gojoOn then break end
+        local char = lp.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then
+            for _, v in ipairs(ps:GetPlayers()) do
+                if v ~= lp and v.Character then
+                    local t_hum = v.Character:FindFirstChild("Humanoid")
+                    local t_root = v.Character:FindFirstChild("HumanoidRootPart")
+                    if t_hum and t_hum.Health > 0 and t_root then
+                        root.CFrame = t_root.CFrame * CFrame.new(0, 0, 1.2)
+                        task.wait()
+                    end
+                end
+            end
+        end
+        task.wait()
+    end
+    gBusy = false
+    if gojoOn and getgenv().ez then pcall(getgenv().ez) end
+end
+
+task.spawn(function()
+    pcall(function()
+        local hbCtrl = require(lp.PlayerScripts.Controllers.Combat.HitboxController)
+        local oldSB = hbCtrl.SphereHitbox
+        hbCtrl.SphereHitbox = function(self, p1, p2, p3)
+            return oldSB(self, p1, p2, 600)
+        end
+    end)
+end)
+
+----------------------------------------------------------------
+-- NAMECALL HOOK
+----------------------------------------------------------------
+local old
+old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    if not checkcaller() and (method == "FireServer" or method == "fireServer") then
+        if blocked and (self == acCam or self == event) then return nil end
+        if gojoOn then
+            if rawequal(self, acCam) and getgenv().is_blocking then
+                return nil
+            elseif self == g_ult then
+                lastU = os.clock()
+            elseif self == g_r and not gBusy then
+                if os.clock() - lastU <= 4 then
+                    gBusy = true
+                    task.spawn(function()
+                        local wait_t = 6.45 - (os.clock() - lastU)
+                        if wait_t > 0 then task.wait(wait_t) end
+                        wipe()
+                    end)
+                end
+            end
+        end
+    end
+    return old(self, ...)
+end))
+
+----------------------------------------------------------------
+-- TARGET HELPERS
+----------------------------------------------------------------
+local function findTargetByDisplay(name)
+    if not name then return nil end
+    name = name:lower()
+    for _, plr in ipairs(ps:GetPlayers()) do
+        if plr ~= lp then
+            if plr.DisplayName:lower() == name or plr.Name:lower() == name then return plr end
+        end
+    end
+    for _, plr in ipairs(ps:GetPlayers()) do
+        if plr ~= lp and plr.DisplayName:lower():find(name, 1, true) then return plr end
+    end
+    return nil
+end
+
+local function isValidTarget(plr)
+    if not plr or not plr.Parent then return false end
+    local c = plr.Character
+    if not c then return false end
+    local hrp = c:FindFirstChild("HumanoidRootPart")
+    local hum = c:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum or hum.Health <= 0 then return false end
+    return true, hrp
+end
+
+local function isDead(plr)
+    if not plr or not plr.Parent then return true end
+    local c = plr.Character
+    if not c then return true end
+    local hum = c:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return true end
+    return false
+end
+
+local function getTargetHealth(plr)
+    if not plr or not plr.Parent then return nil end
+    local c = plr.Character
+    if not c then return nil end
+    local hum = c:FindFirstChildOfClass("Humanoid")
+    if not hum then return nil end
+    return hum.Health
+end
+
+local function getBehindCFrame(targetHRP, offset, yOff)
+    local lookBack = targetHRP.CFrame.LookVector * -offset
+    local pos = targetHRP.Position + lookBack + Vector3.new(0, yOff or 0, 0)
+    return CFrame.new(pos, targetHRP.Position)
+end
+
+local function getUnderCFrame(targetHRP, offset, rotAngle)
+    local pos = targetHRP.Position - Vector3.new(0, offset or 3, 0)
+    local look = targetHRP.CFrame.LookVector
+    local flatLook = Vector3.new(look.X, 0, look.Z).Unit
+    local baseCF = CFrame.lookAt(pos, pos + flatLook)
+    return baseCF * CFrame.Angles(math.rad(rotAngle or 90), 0, 0)
+end
+
+local function getPlayerList()
+    local t = {}
+    for _, plr in ipairs(ps:GetPlayers()) do
+        if plr ~= lp then table.insert(t, plr.DisplayName) end
+    end
+    return t
+end
+
+-- Build whitelist set from State.LockTargets
+local function buildLockWhitelist()
+    if not State.LockTargets or #State.LockTargets == 0 then return nil end
+    local set = {}
+    for _, name in ipairs(State.LockTargets) do
+        set[name:lower()] = true
+    end
+    return set
+end
+
+local function isInLockWhitelist(plr, set)
+    if not set then return true end -- nil = allow all
+    if set[plr.DisplayName:lower()] then return true end
+    if set[plr.Name:lower()] then return true end
+    return false
+end
+
+-- Nearest alive target within range, respecting whitelist
+local function findNearestPlayer(range)
+    local myChar = lp.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return nil end
+
+    local whitelist = buildLockWhitelist()
+
+    local best, bestDist = nil, math.huge
+    for _, plr in ipairs(ps:GetPlayers()) do
+        if plr ~= lp and isInLockWhitelist(plr, whitelist) then
+            local ok, thrp = isValidTarget(plr)
+            if ok then
+                local d = (thrp.Position - myHRP.Position).Magnitude
+                if d <= range and d < bestDist then
+                    bestDist = d
+                    best = plr
+                end
+            end
+        end
+    end
+    return best
+end
+
+----------------------------------------------------------------
+-- INVISIBILITY
+----------------------------------------------------------------
+local function disableInvis()
+    if invisConn then invisConn:Disconnect() invisConn = nil end
+    if ft then pcall(function() ft:Destroy() end) ft = nil end
+    if invisTrack then pcall(function() invisTrack:Stop(0) end) invisTrack = nil end
+
+    local char = lp.Character
+    if char then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hrp and oC0 then
+            local rj = hrp:FindFirstChild("RootJoint")
+                or (char:FindFirstChild("LowerTorso") and char.LowerTorso:FindFirstChild("Root"))
+            if rj then pcall(function() rj.C0 = oC0 end) end
+        end
+        if hum then hum.AutoRotate = true end
+    end
+
+    pcall(function()
+        cam.CameraType = Enum.CameraType.Custom
+        if lp.Character then
+            local hum = lp.Character:FindFirstChildOfClass("Humanoid")
+            if hum then cam.CameraSubject = hum end
+        end
+    end)
+    oC0 = nil
+end
+
+local function setInvis(char)
+    char = char or lp.Character
+    if not char then return end
+
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp then return end
+
+    local rj = hrp:FindFirstChild("RootJoint")
+        or (char:FindFirstChild("LowerTorso") and char.LowerTorso:FindFirstChild("Root"))
+    if rj then
+        oC0 = rj.C0
+        rj.C0 = oC0 - Vector3.new(0, INVIS_OFF, 0)
+    end
+
+    hum.AutoRotate = false
+    lp.DevEnableMouseLock = true
+
+    if ft then pcall(function() ft:Destroy() end) end
+    ft = Instance.new("Part")
+    ft.Name = "JJSFakeTorso"
+    ft.Size = Vector3.new(2, 2, 1)
+    ft.Transparency = 1
+    ft.CanCollide = false
+    ft.Anchored = true
+    ft.Parent = workspace
+
+    cam.CameraType = Enum.CameraType.Custom
+    cam.CameraSubject = ft
+
+    if invisConn then invisConn:Disconnect() end
+    invisConn = rs.RenderStepped:Connect(function()
+        if not invisOn then return end
+        local c2 = lp.Character
+        if not c2 then return end
+        local hrp2 = c2:FindFirstChild("HumanoidRootPart")
+        if not hrp2 then return end
+
+        local rj2 = hrp2:FindFirstChild("RootJoint")
+            or (c2:FindFirstChild("LowerTorso") and c2.LowerTorso:FindFirstChild("Root"))
+        if rj2 and oC0 then
+            local target = oC0 - Vector3.new(0, INVIS_OFF, 0)
+            if rj2.C0 ~= target then rj2.C0 = target end
+        end
+
+        for _, p in ipairs(c2:GetDescendants()) do
+            if p:IsA("BasePart") and p.CanCollide then
+                p.CanCollide = false
+            end
+        end
+
+        local lookDir
+        local lockedT = currentTarget or lockOnTarget
+        if lockedT and isValidTarget(lockedT) then
+            local _, thrp = isValidTarget(lockedT)
+            if thrp then
+                local d = thrp.Position - hrp2.Position
+                lookDir = Vector3.new(d.X, 0, d.Z)
+            end
+        end
+        if not lookDir or lookDir.Magnitude < 0.01 then
+            local camCF = cam.CFrame
+            lookDir = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
+        end
+        if lookDir.Magnitude > 0 then
+            lookDir = lookDir.Unit
+            hrp2.CFrame = CFrame.new(hrp2.Position, hrp2.Position + lookDir)
+        end
+        if ft then ft.CFrame = hrp2.CFrame * CFrame.new(0, 1.5, 0) end
+    end)
+
+    pcall(function()
+        local anim = rep.Modules.MVP.Meditation.Character
+        invisTrack = hum:LoadAnimation(anim)
+        invisTrack.Priority = Enum.AnimationPriority.Action4
+        invisTrack:Play()
+        task.wait(0.1)
+        invisTrack.TimePosition = 0.1
+        invisTrack:AdjustSpeed(0)
+        for _, t in ipairs(hum:GetPlayingAnimationTracks()) do
+            if t ~= invisTrack then t:Stop(0) end
+        end
+        hum.AnimationPlayed:Connect(function(t)
+            if not invisOn then return end
+            if t ~= invisTrack then t:Stop(0) end
+        end)
+    end)
+end
+
+----------------------------------------------------------------
+-- FREEZE
+----------------------------------------------------------------
+local function startFreeze()
+    local char = lp.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    freezeLockedCF = hrp.CFrame
+    if freezeConn then freezeConn:Disconnect() end
+    freezeConn = rs.Heartbeat:Connect(function()
+        local c = lp.Character
+        local r = c and c:FindFirstChild("HumanoidRootPart")
+        if not r or not freezeLockedCF then return end
+        r.CFrame = freezeLockedCF
+        r.AssemblyLinearVelocity = Vector3.zero
+        r.AssemblyAngularVelocity = Vector3.zero
+    end)
+end
+
+local function stopFreeze()
+    if freezeConn then freezeConn:Disconnect() freezeConn = nil end
+    freezeLockedCF = nil
+end
+
+----------------------------------------------------------------
+-- FACE TARGET (rotation ONLY)
+----------------------------------------------------------------
+local function startFaceTarget()
+    if faceConn then return end
+
+    local char = lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and savedAutoRotate == nil then
+        savedAutoRotate = hum.AutoRotate
+    end
+
+    faceConn = rs.RenderStepped:Connect(function()
+        if not State.LockOnEnabled then return end
+        if not State.FaceTargetEnabled then return end
+        if not lockOnTarget then return end
+
+        local myChar = lp.Character
+        if not myChar then return end
+        local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+        local myHum = myChar:FindFirstChildOfClass("Humanoid")
+        if not myHRP or not myHum then return end
+
+        if myHum.AutoRotate then myHum.AutoRotate = false end
+
+        local ok, thrp = isValidTarget(lockOnTarget)
+        if not ok or not thrp then return end
+
+        local myPos = myHRP.Position
+        local tPos  = thrp.Position
+        local diff  = tPos - myPos
+        local flat  = Vector3.new(diff.X, 0, diff.Z)
+        if flat.Magnitude < 0.01 then return end
+
+        local newCF = CFrame.new(myPos, myPos + flat.Unit)
+        if myHRP.CFrame ~= newCF then
+            myHRP.CFrame = newCF
+        end
+    end)
+end
+
+local function stopFaceTarget()
+    if faceConn then faceConn:Disconnect() faceConn = nil end
+    local char = lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.AutoRotate = (savedAutoRotate == nil) or savedAutoRotate
+    end
+    savedAutoRotate = nil
+end
+
+----------------------------------------------------------------
+-- LOCK ON
+----------------------------------------------------------------
+local function stopLockOn()
+    if lockOnConn then lockOnConn:Disconnect() lockOnConn = nil end
+    lockOnTarget = nil
+    stopFaceTarget()
+    pcall(function()
+        if cam.CameraType == Enum.CameraType.Scriptable then
+            cam.CameraType = Enum.CameraType.Custom
+        end
+        if invisOn and ft then
+            cam.CameraSubject = ft
+        else
+            local h = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+            if h then cam.CameraSubject = h end
+        end
+    end)
+end
+
+local function startLockOn()
+    if lockOnConn then return end
+    if State.FaceTargetEnabled then startFaceTarget() end
+    lockOnConn = rs.RenderStepped:Connect(function()
+        if not State.LockOnEnabled then return end
+
+        local myChar = lp.Character
+        local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if not myHRP then return end
+
+        local whitelist = buildLockWhitelist()
+
+        local needNew = false
+        if not lockOnTarget then
+            needNew = true
+        else
+            local ok, thrp = isValidTarget(lockOnTarget)
+            if not ok or not thrp then
+                needNew = true
+            elseif not isInLockWhitelist(lockOnTarget, whitelist) then
+                needNew = true
+            else
+                local dist = (thrp.Position - myHRP.Position).Magnitude
+                if dist > State.LockOnRange then needNew = true end
+            end
+        end
+
+        if needNew then
+            lockOnTarget = findNearestPlayer(State.LockOnRange)
+            if not lockOnTarget then
+                if cam.CameraType == Enum.CameraType.Scriptable then
+                    cam.CameraType = Enum.CameraType.Custom
+                    if invisOn and ft then
+                        cam.CameraSubject = ft
+                    else
+                        local h = myChar:FindFirstChildOfClass("Humanoid")
+                        if h then cam.CameraSubject = h end
+                    end
+                end
+                return
+            end
+        end
+
+        local ok, thrp = isValidTarget(lockOnTarget)
+        if not ok or not thrp then return end
+
+        if cam.CameraType ~= Enum.CameraType.Scriptable then
+            cam.CameraType = Enum.CameraType.Scriptable
+        end
+
+        local L = thrp.CFrame.LookVector
+        local flat = Vector3.new(L.X, 0, L.Z)
+        if flat.Magnitude < 0.01 then return end
+        flat = flat.Unit
+
+        local camPos = thrp.Position - flat * State.LockCamDist + Vector3.new(0, State.LockCamHeight, 0)
+        local lookAt = thrp.Position + flat * 10
+        cam.CFrame = CFrame.lookAt(camPos, lookAt)
+    end)
+end
+
+----------------------------------------------------------------
+-- COORDINATES TP
+----------------------------------------------------------------
+local function tpToCoords()
+    local char = lp.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    hrp.CFrame = CFrame.new(State.CoordX, State.CoordY, State.CoordZ)
+end
+
+----------------------------------------------------------------
+-- CHARACTER ADDED
+----------------------------------------------------------------
+lp.CharacterAdded:Connect(function(newChar)
+    oC0 = nil
+    savedAutoRotate = nil
+    if wsOn then
+        task.spawn(function()
+            local hum = newChar:WaitForChild("Humanoid", 5)
+            if hum then hum.WalkSpeed = wsVal end
+        end)
+    end
+    if invisOn then
+        newChar:WaitForChild("HumanoidRootPart", 5)
+        newChar:WaitForChild("Humanoid", 5)
+        setInvis(newChar)
+    end
+    if State.FreezeEnabled then
+        task.spawn(function()
+            local hrp = newChar:WaitForChild("HumanoidRootPart", 5)
+            if not hrp then return end
+            task.wait(0.1)
+            startFreeze()
+        end)
+    end
+    if State.LockOnEnabled and State.FaceTargetEnabled then
+        task.spawn(function()
+            newChar:WaitForChild("Humanoid", 5)
+            task.wait(0.1)
+            if faceConn then faceConn:Disconnect() faceConn = nil end
+            startFaceTarget()
+        end)
+    end
+    -- TP on spawn
+    if State.TPOnSpawn then
+        task.spawn(function()
+            local hrp = newChar:WaitForChild("HumanoidRootPart", 5)
+            if not hrp then return end
+            task.wait(0.3)
+            tpToCoords()
+        end)
+    end
+end)
+
+----------------------------------------------------------------
+-- CAMERA PROXY
+----------------------------------------------------------------
+local function updateCam(pos)
+    if not camProxy or not camProxy.Parent then
+        camProxy = Instance.new("Part")
+        camProxy.Name = "CamProxy"
+        camProxy.Size = Vector3.new(1, 1, 1)
+        camProxy.Transparency = 1
+        camProxy.CanCollide = false
+        camProxy.Anchored = true
+        camProxy.Parent = workspace
+    end
+    camProxy.CFrame = CFrame.new(pos)
+    if cam.CameraSubject ~= camProxy then
+        cam.CameraSubject = camProxy
+    end
+end
+
+local function resetCam()
+    if camProxy then
+        pcall(function() camProxy:Destroy() end)
+        camProxy = nil
+    end
+    if invisOn and ft then
+        cam.CameraSubject = ft
+        return
+    end
+    local char = lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and cam.CameraSubject ~= hum then
+        cam.CameraSubject = hum
+    end
+end
+
+----------------------------------------------------------------
+-- CAMERA BACK-LOCK (Multi-TP)
+----------------------------------------------------------------
+local function startCamLock()
+    if camLockConn then return end
+    camLockConn = rs.RenderStepped:Connect(function()
+        if not multiBusy then return end
+        if not currentTarget then return end
+        if not invisOn then return end
+
+        local ok, thrp = isValidTarget(currentTarget)
+        if not ok or not thrp then return end
+
+        if cam.CameraType ~= Enum.CameraType.Scriptable then
+            cam.CameraType = Enum.CameraType.Scriptable
+        end
+
+        local L = thrp.CFrame.LookVector
+        local flat = Vector3.new(L.X, 0, L.Z)
+        if flat.Magnitude < 0.01 then return end
+        flat = flat.Unit
+
+        local camPos = thrp.Position - flat * State.BackCamDist + Vector3.new(0, State.BackCamHeight, 0)
+        local lookAt = thrp.Position + flat * 10
+        cam.CFrame = CFrame.lookAt(camPos, lookAt)
+    end)
+end
+
+local function stopCamLock()
+    if camLockConn then camLockConn:Disconnect() camLockConn = nil end
+    pcall(function()
+        cam.CameraType = Enum.CameraType.Custom
+        if invisOn and ft then
+            cam.CameraSubject = ft
+        elseif lp.Character then
+            local h = lp.Character:FindFirstChildOfClass("Humanoid")
+            if h then cam.CameraSubject = h end
+        end
+    end)
+    currentTarget = nil
+end
+
+----------------------------------------------------------------
+-- MULTI-TARGET TP
+----------------------------------------------------------------
+local function sortTargetsByProximity(tps)
+    local density, minDistance, positions = {}, {}, {}
+    for _, p in ipairs(tps) do
+        local ok, hrp = isValidTarget(p)
+        if ok then positions[p] = hrp.Position end
+    end
+    for _, p1 in ipairs(tps) do
+        local pos1 = positions[p1]
+        if pos1 then
+            local count, minDist = 0, 999999
+            for _, p2 in ipairs(tps) do
+                if p1 ~= p2 then
+                    local pos2 = positions[p2]
+                    if pos2 then
+                        local dist = (pos1 - pos2).Magnitude
+                        if dist < 50 then count = count + 1 end
+                        if dist < minDist then minDist = dist end
+                    end
+                end
+            end
+            density[p1] = count
+            minDistance[p1] = minDist
+        else
+            density[p1] = -1
+            minDistance[p1] = 999999
+        end
+    end
+    table.sort(tps, function(a, b)
+        local denA, denB = density[a] or -1, density[b] or -1
+        if denA ~= denB then return denA > denB end
+        return (minDistance[a] or 999999) < (minDistance[b] or 999999)
+    end)
+end
+
+local function runMultiTP()
+    if multiBusy then return end
+    if #State.MultiTargets == 0 then return end
+    multiBusy = true
+    startCamLock()
+
+    repeat
+        local tps = {}
+        for _, name in ipairs(State.MultiTargets) do
+            local p = findTargetByDisplay(name)
+            if p then table.insert(tps, p) end
+        end
+        if #tps == 0 then task.wait(0.5) continue end
+
+        if State.TargetOrder == "Proximity" then
+            sortTargetsByProximity(tps)
+        end
+
+        for _, tp in ipairs(tps) do
+            if not multiBusy then break end
+            currentTarget = tp
+
+            if State.MultiMode == "Smart" then
+                local waitStart = os.clock()
+                local committed = false
+                while multiBusy do
+                    if isDead(tp) then break end
+                    local hp = getTargetHealth(tp)
+                    if hp and hp <= State.SmartHPThresh then
+                        committed = true
+                        break
+                    end
+                    if os.clock() - waitStart > State.SmartWaitMax then break end
+                    task.wait(0.05)
+                end
+                if not committed then
+                    currentTarget = nil
+                    if State.MultiDelay > 0 then task.wait(State.MultiDelay) end
+                    continue
+                end
+            end
+
+            local deadFrames = 0
+            while multiBusy do
+                if isDead(tp) then
+                    deadFrames = deadFrames + 1
+                    if deadFrames >= 5 then break end
+                else
+                    deadFrames = 0
+                end
+
+                if State.MultiMode == "Smart" then
+                    local liveHP = getTargetHealth(tp)
+                    if liveHP and liveHP > State.SmartHPThresh and not isDead(tp) then
+                        break
+                    end
+                end
+
+                local ok, thrp = isValidTarget(tp)
+                if ok then
+                    local mc = lp.Character
+                    local mhrp = mc and mc:FindFirstChild("HumanoidRootPart")
+                    local mhum = mc and mc:FindFirstChildOfClass("Humanoid")
+                    if mhrp and mhum then
+                        mhrp.AssemblyLinearVelocity = Vector3.zero
+                        mhrp.AssemblyAngularVelocity = Vector3.zero
+                        local goal
+                        if State.MultiMode == "Under" then
+                            mhum.PlatformStand = true
+                            goal = getUnderCFrame(thrp, State.OffsetUnder, State.UnderRot)
+                            if not invisOn then updateCam(thrp.Position) end
+                        elseif State.MultiMode == "Exact" then
+                            mhum.PlatformStand = false
+                            if not invisOn then resetCam() end
+                            goal = thrp.CFrame
+                        else
+                            mhum.PlatformStand = false
+                            if not invisOn then resetCam() end
+                            goal = getBehindCFrame(thrp, State.OffsetBehind, State.OffsetY)
+                        end
+                        mhrp.CFrame = goal
+                    end
+                end
+                rs.Heartbeat:Wait()
+            end
+
+            currentTarget = nil
+            if State.MultiDelay > 0 then
+                task.wait(State.MultiDelay)
+            end
+        end
+        task.wait(0.01)
+    until not State.MultiLoop or not multiBusy
+
+    multiBusy = false
+    currentTarget = nil
+    stopCamLock()
+    resetCam()
+    local mc = lp.Character
+    local mhum = mc and mc:FindFirstChildOfClass("Humanoid")
+    if mhum then mhum.PlatformStand = false end
+end
+
+----------------------------------------------------------------
+-- AUTO M1 / M1 CANCEL
+----------------------------------------------------------------
+task.spawn(function()
+    local m1Count = 0
+    while true do
+        if State.AutoM1 then
+            pcall(function()
+                if naoyaM1 then naoyaM1:FireServer() end
+                m1Count = m1Count + 1
+
+                if State.M1Cancel and m1Count >= 3 then
+                    m1Count = 0
+                    task.wait(0.02)
+                    vm:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+                    task.wait(0.01)
+                    vm:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+                end
+            end)
+        else
+            m1Count = 0
+        end
+        task.wait(State.M1Delay)
+    end
+end)
+
+----------------------------------------------------------------
+-- ANTI-AFK
+----------------------------------------------------------------
+lp.Idled:Connect(function()
+    pcall(function()
+        vu:CaptureController()
+        vu:ClickButton2(Vector2.new())
+    end)
+end)
+
+----------------------------------------------------------------
+-- WINDUI
+----------------------------------------------------------------
+local Window = w:CreateWindow({
+    Title        = "RAIN HUB",
+    Icon         = "zap",
+    Author       = "RAIN",
+    Folder       = "RAIN_HUB",
+    Size         = UDim2.fromOffset(580, 460),
+    Transparent  = true,
+    Theme        = "Dark",
+    SideBarWidth = 170,
+})
+
+Window:Tag({ Title = "v2.4", Color = Color3.fromRGB(255, 200, 80) })
+
+----------------------------------------------------------------
+-- MAIN TAB
+----------------------------------------------------------------
+local MainTab = Window:Tab({ Title = "Main", Icon = "home" })
+
+MainTab:Section({ Title = "Combat" })
+
+MainTab:Toggle({
+    Title = "Auto M1",
+    Desc  = "Fires NaoyaService.RE.Activated remote to spam M1",
+    Default = false,
+    Callback = function(v) State.AutoM1 = v end,
+})
+
+MainTab:Slider({
+    Title = "M1 Delay",
+    Desc  = "Delay between Auto M1 fires (seconds)",
+    Step  = 0.01,
+    Value = { Min = 0.01, Max = 2.0, Default = 0.1 },
+    Callback = function(v) State.M1Delay = tonumber(v) end,
+})
+
+MainTab:Toggle({
+    Title = "M1 Cancel",
+    Desc  = "Presses R after every 3rd M1 to cancel animation delay",
+    Default = false,
+    Callback = function(v) State.M1Cancel = v end,
+})
+
+MainTab:Toggle({
+    Title = "Gojo Kill All",
+    Desc  = "Auto wipes and teleports to safe zone on Ultimate + Right Click",
+    Default = false,
+    Callback = function(v) gojoOn = v end,
+})
+
+MainTab:Section({ Title = "Movement" })
+
+MainTab:Toggle({
+    Title = "Walk Speed",
+    Desc  = "Enable custom walk speed (set value with slider below)",
+    Default = false,
+    Callback = function(state)
+        wsOn = state
+        local char = lp.Character
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        if state then
+            if hum then hum.WalkSpeed = wsVal end
+            if not wsConn then
+                wsConn = rs.Heartbeat:Connect(function()
+                    if not wsOn then wsConn:Disconnect() wsConn = nil return end
+                    local c = lp.Character
+                    local h = c and c:FindFirstChildOfClass("Humanoid")
+                    if h then h.WalkSpeed = wsVal end
+                end)
+            end
+        else
+            if wsConn then wsConn:Disconnect() wsConn = nil end
+            if hum then hum.WalkSpeed = 16 end
+        end
+    end
+})
+
+MainTab:Slider({
+    Title = "Walk Speed Value",
+    Desc  = "Character walk speed (default = 16)",
+    Step  = 1,
+    Value = { Min = 1, Max = 250, Default = 16 },
+    Callback = function(value)
+        wsVal = value
+        local char = lp.Character
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        if wsOn and hum then hum.WalkSpeed = value end
+    end
+})
+
+MainTab:Toggle({
+    Title = "Noclip",
+    Desc  = "Disables collision on your character",
+    Default = false,
+    Callback = function(state)
+        ncOn = state
+        if state then
+            if not ncConn2 then
+                ncConn2 = rs.Stepped:Connect(function()
+                    if not ncOn then ncConn2:Disconnect() ncConn2 = nil return end
+                    local char = lp.Character
+                    if char then
+                        for _, p in ipairs(char:GetDescendants()) do
+                            if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end
+                        end
+                    end
+                end)
+            end
+        else
+            if ncConn2 then ncConn2:Disconnect() ncConn2 = nil end
+        end
+    end
+})
+
+MainTab:Section({ Title = "Exploits" })
+
+MainTab:Toggle({
+    Title = "Invisibility",
+    Desc  = "RootJoint Y-offset invis with meditation animation",
+    Default = false,
+    Callback = function(state)
+        invisOn = state
+        if state then
+            if lp.Character then setInvis(lp.Character) end
+        else
+            disableInvis()
+        end
+    end
+})
+
+MainTab:Button({
+    Title = "AC Bypass",
+    Desc  = "Bypasses anti-cheat detection for ~50 seconds",
+    Callback = function()
+        task.spawn(function()
+            local nc2Active = true
+            local nc2Conn
+            nc2Conn = rs.Stepped:Connect(function()
+                if nc2Active and lp.Character then
+                    for _, part in ipairs(lp.Character:GetDescendants()) do
+                        if part:IsA("BasePart") then part.CanCollide = false end
+                    end
+                end
+            end)
+
+            local screenGui = Instance.new("ScreenGui")
+            screenGui.Name = "KowakCatOverlay"
+            screenGui.IgnoreGuiInset = true
+            screenGui.Parent = cg
+
+            local frame = Instance.new("Frame")
+            frame.Size = UDim2.new(1,0,1,0)
+            frame.BackgroundColor3 = Color3.new(0,0,0)
+            frame.Parent = screenGui
+
+            local label = Instance.new("TextLabel")
+            label.Size = UDim2.new(1,0,0,50)
+            label.Position = UDim2.new(0,0,0.5,-25)
+            label.BackgroundTransparency = 1
+            label.TextColor3 = Color3.new(1,1,1)
+            label.TextSize = 40
+            label.Font = Enum.Font.SourceSansBold
+            label.Text = "Made by kowak and cat"
+            label.Parent = frame
+
+            local timerGui = Instance.new("ScreenGui")
+            timerGui.Name = "ACBypassTimer"
+            timerGui.IgnoreGuiInset = true
+            timerGui.ResetOnSpawn = false
+            timerGui.DisplayOrder = 999
+            timerGui.Parent = cg
+
+            local timerFrame = Instance.new("Frame")
+            timerFrame.Size = UDim2.new(0, 210, 0, 44)
+            timerFrame.Position = UDim2.new(1, -220, 0, 12)
+            timerFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+            timerFrame.BackgroundTransparency = 0.2
+            timerFrame.BorderSizePixel = 0
+            timerFrame.Parent = timerGui
+            local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(0,8); tc.Parent = timerFrame
+
+            local accentBar = Instance.new("Frame")
+            accentBar.Size = UDim2.new(0, 4, 1, 0)
+            accentBar.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+            accentBar.BorderSizePixel = 0
+            accentBar.Parent = timerFrame
+            local ac2 = Instance.new("UICorner"); ac2.CornerRadius = UDim.new(0,4); ac2.Parent = accentBar
+
+            local timerLabel = Instance.new("TextLabel")
+            timerLabel.Size = UDim2.new(1,-14,1,0)
+            timerLabel.Position = UDim2.new(0,14,0,0)
+            timerLabel.BackgroundTransparency = 1
+            timerLabel.TextColor3 = Color3.fromRGB(255,255,255)
+            timerLabel.TextSize = 17
+            timerLabel.Font = Enum.Font.GothamBold
+            timerLabel.TextXAlignment = Enum.TextXAlignment.Left
+            timerLabel.Text = "  AC Bypass: 50s"
+            timerLabel.Parent = timerFrame
+
+            task.spawn(function()
+                for remaining = 49, 0, -1 do
+                    task.wait(1)
+                    if not timerLabel or not timerLabel.Parent then break end
+                    timerLabel.Text = "  AC Bypass: " .. remaining .. "s"
+                    local pct = remaining / 50
+                    accentBar.BackgroundColor3 = Color3.fromRGB(255, math.floor(pct*180), math.floor(pct*60))
+                end
+                if timerGui and timerGui.Parent then timerGui:Destroy() end
+            end)
+
+            blocked = true
+            task.wait(45)
+            blocked = false
+            task.spawn(autodie)
+            blocked = true
+            task.wait(5)
+            screenGui:Destroy()
+            nc2Active = false
+            if nc2Conn then nc2Conn:Disconnect() end
+            blocked = false
+        end)
+    end
+})
+
+MainTab:Section({ Title = "Utility" })
+
+MainTab:Paragraph({
+    Title = "Anti-AFK",
+    Desc  = "Always active. Bypasses 20-min idle kick automatically.",
+})
+
+MainTab:Button({
+    Title = "Force Reset (Instant Respawn)",
+    Desc  = "Triggers local autodie logic instantly",
+    Callback = function() task.spawn(autodie) end,
+})
+
+MainTab:Button({
+    Title = "Show My Ping",
+    Callback = function() local p = getPingMs() end,
+})
+
+----------------------------------------------------------------
+-- MULTI-TP TAB
+----------------------------------------------------------------
+local MultiTab = Window:Tab({ Title = "Multi TP", Icon = "users" })
+
+MultiTab:Section({ Title = "Targets" })
+
+local multiDropdown = MultiTab:Dropdown({
+    Title  = "Select Targets (Multi)",
+    Desc   = "Pick order is preserved when Target Order = Order",
+    Values = getPlayerList(),
+    Value  = {},
+    Multi  = true,
+    AllowNone = true,
+    Callback = function(v)
+        local incoming = {}
+        if type(v) == "table" then
+            for k, val in pairs(v) do
+                if type(k) == "number" then
+                    incoming[val] = true
+                elseif val == true then
+                    incoming[k] = true
+                end
+            end
+        end
+
+        local newList = {}
+        for _, name in ipairs(State.MultiTargets) do
+            if incoming[name] then
+                table.insert(newList, name)
+                incoming[name] = nil
+            end
+        end
+        for name in pairs(incoming) do
+            table.insert(newList, name)
+        end
+        State.MultiTargets = newList
+    end,
+})
+
+MultiTab:Button({
+    Title = "Refresh Players",
+    Callback = function() multiDropdown:Refresh(getPlayerList()) end,
+})
+
+MultiTab:Button({
+    Title = "Clear All Targets",
+    Callback = function()
+        State.MultiTargets = {}
+        pcall(function() multiDropdown:Select({}) end)
+    end,
+})
+
+MultiTab:Section({ Title = "Settings" })
+
+MultiTab:Dropdown({
+    Title  = "TP Mode",
+    Desc   = "Smart = wait for target HP ≤ threshold (kill signal), then TP behind",
+    Values = {"Behind", "Under", "Exact", "Smart"},
+    Value  = "Behind",
+    Callback = function(v) State.MultiMode = v end,
+})
+
+MultiTab:Dropdown({
+    Title  = "Target Order",
+    Desc   = "Proximity = auto-sort by cluster density. Order = use pick order.",
+    Values = {"Proximity", "Order"},
+    Value  = "Proximity",
+    Callback = function(v) State.TargetOrder = v end,
+})
+
+MultiTab:Slider({
+    Title = "Behind Offset",
+    Value = { Min = 1, Max = 20, Default = 3 },
+    Step  = 1,
+    Callback = function(v) State.OffsetBehind = tonumber(v) end,
+})
+
+MultiTab:Slider({
+    Title = "Y Offset (Behind Mode)",
+    Value = { Min = -10, Max = 10, Default = 0 },
+    Step  = 1,
+    Callback = function(v) State.OffsetY = tonumber(v) end,
+})
+
+MultiTab:Slider({
+    Title = "Under Offset (Depth)",
+    Value = { Min = 1, Max = 20, Default = 3 },
+    Step  = 1,
+    Callback = function(v) State.OffsetUnder = tonumber(v) end,
+})
+
+MultiTab:Slider({
+    Title = "Under Rotation (Angle)",
+    Value = { Min = -180, Max = 180, Default = 90 },
+    Step  = 5,
+    Callback = function(v) State.UnderRot = tonumber(v) end,
+})
+
+MultiTab:Slider({
+    Title = "Hop Delay (seconds)",
+    Value = { Min = 0, Max = 2, Default = 0 },
+    Step  = 0.05,
+    Callback = function(v) State.MultiDelay = tonumber(v) end,
+})
+
+MultiTab:Toggle({
+    Title = "Loop Forever",
+    Default = false,
+    Callback = function(v) State.MultiLoop = v end,
+})
+
+MultiTab:Section({ Title = "Smart Mode Settings" })
+
+MultiTab:Slider({
+    Title = "Smart HP Threshold",
+    Desc  = "TP commits when target HP is at or below this value",
+    Value = { Min = 1, Max = 100, Default = 1 },
+    Step  = 1,
+    Callback = function(v) State.SmartHPThresh = tonumber(v) end,
+})
+
+MultiTab:Slider({
+    Title = "Smart Max Wait (seconds)",
+    Desc  = "If target won't drop below threshold within this time, skip them",
+    Value = { Min = 1, Max = 30, Default = 10 },
+    Step  = 1,
+    Callback = function(v) State.SmartWaitMax = tonumber(v) end,
+})
+
+MultiTab:Section({ Title = "Back-Cam Lock (auto when Invis + Loop)" })
+
+MultiTab:Slider({
+    Title = "Back-Cam Distance",
+    Value = { Min = 2, Max = 25, Default = 6 },
+    Step  = 1,
+    Callback = function(v) State.BackCamDist = tonumber(v) end,
+})
+
+MultiTab:Slider({
+    Title = "Back-Cam Height",
+    Value = { Min = -5, Max = 15, Default = 2 },
+    Step  = 1,
+    Callback = function(v) State.BackCamHeight = tonumber(v) end,
+})
+
+MultiTab:Section({ Title = "Run" })
+
+MultiTab:Button({
+    Title = "Run Multi-TP",
+    Callback = function() task.spawn(runMultiTP) end,
+})
+
+MultiTab:Button({
+    Title = "Stop Multi-TP",
+    Callback = function()
+        multiBusy = false
+        State.MultiLoop = false
+        stopCamLock()
+        resetCam()
+    end
+})
+
+----------------------------------------------------------------
+-- LOCK ON TAB (v2.4 — whitelist support)
+----------------------------------------------------------------
+local LockTab = Window:Tab({ Title = "Lock On", Icon = "target" })
+
+LockTab:Section({ Title = "Targets" })
+
+LockTab:Paragraph({
+    Title = "Target Whitelist",
+    Desc  = "Pick which players Lock On is allowed to engage. Leave EMPTY = lock onto ANY player in range.",
+})
+
+local lockDropdown = LockTab:Dropdown({
+    Title  = "Select Lock-On Targets",
+    Desc   = "Multi-select. Empty = all players eligible.",
+    Values = getPlayerList(),
+    Value  = {},
+    Multi  = true,
+    AllowNone = true,
+    Callback = function(v)
+        local incoming = {}
+        if type(v) == "table" then
+            for k, val in pairs(v) do
+                if type(k) == "number" then
+                    incoming[val] = true
+                elseif val == true then
+                    incoming[k] = true
+                end
+            end
+        end
+
+        local newList = {}
+        for _, name in ipairs(State.LockTargets) do
+            if incoming[name] then
+                table.insert(newList, name)
+                incoming[name] = nil
+            end
+        end
+        for name in pairs(incoming) do
+            table.insert(newList, name)
+        end
+        State.LockTargets = newList
+
+        -- If current target no longer whitelisted, drop it
+        if lockOnTarget then
+            local whitelist = buildLockWhitelist()
+            if not isInLockWhitelist(lockOnTarget, whitelist) then
+                lockOnTarget = nil
+            end
+        end
+    end,
+})
+
+LockTab:Button({
+    Title = "Refresh Players",
+    Callback = function() lockDropdown:Refresh(getPlayerList()) end,
+})
+
+LockTab:Button({
+    Title = "Clear All Targets",
+    Callback = function()
+        State.LockTargets = {}
+        pcall(function() lockDropdown:Select({}) end)
+        lockOnTarget = nil
+    end,
+})
+
+LockTab:Section({ Title = "Auto Lock On" })
+
+LockTab:Paragraph({
+    Title = "How it works",
+    Desc  = "Auto-engages on script load. Camera locks onto nearest WHITELISTED alive player within range. Face Target rotates your character toward them every frame (M1s land). Position is untouched.",
+})
+
+LockTab:Toggle({
+    Title   = "Auto Lock On",
+    Desc    = "Master switch (default ON)",
+    Default = true,
+    Callback = function(v)
+        State.LockOnEnabled = v
+        if v then
+            startLockOn()
+        else
+            stopLockOn()
+        end
+    end
+})
+
+LockTab:Toggle({
+    Title   = "Face Target (Body Rotation)",
+    Desc    = "Always face the locked target so M1s connect. Position unchanged.",
+    Default = true,
+    Callback = function(v)
+        State.FaceTargetEnabled = v
+        if State.LockOnEnabled and v then
+            startFaceTarget()
+        else
+            stopFaceTarget()
+        end
+    end
+})
+
+LockTab:Slider({
+    Title = "Lock Range (studs)",
+    Desc  = "Max distance to consider a target",
+    Value = { Min = 1, Max = 100, Default = 10 },
+    Step  = 1,
+    Callback = function(v) State.LockOnRange = tonumber(v) end,
+})
+
+LockTab:Slider({
+    Title = "Camera Distance",
+    Value = { Min = 2, Max = 25, Default = 8 },
+    Step  = 1,
+    Callback = function(v) State.LockCamDist = tonumber(v) end,
+})
+
+LockTab:Slider({
+    Title = "Camera Height",
+    Value = { Min = -5, Max = 15, Default = 3 },
+    Step  = 1,
+    Callback = function(v) State.LockCamHeight = tonumber(v) end,
+})
+
+LockTab:Button({
+    Title = "Force Re-acquire Target",
+    Callback = function() lockOnTarget = nil end,
+})
+
+LockTab:Section({ Title = "Freeze" })
+
+LockTab:Paragraph({
+    Title = "Freeze",
+    Desc  = "Locks your HumanoidRootPart in place. Auto re-locks on respawn.",
+})
+
+LockTab:Toggle({
+    Title   = "Freeze",
+    Default = false,
+    Callback = function(v)
+        State.FreezeEnabled = v
+        if v then
+            startFreeze()
+        else
+            stopFreeze()
+        end
+    end
+})
+
+LockTab:Button({
+    Title = "Refresh Freeze Anchor",
+    Callback = function()
+        if State.FreezeEnabled then
+            stopFreeze()
+            startFreeze()
+        end
+    end
+})
+
+----------------------------------------------------------------
+-- COORDINATES TAB (NEW)
+----------------------------------------------------------------
+local CoordTab = Window:Tab({ Title = "Coordinates", Icon = "map-pin" })
+
+CoordTab:Section({ Title = "Coordinates" })
+
+CoordTab:Paragraph({
+    Title = "TP To Coordinates",
+    Desc  = "Default: -27.02, -61.527, -251.831. Toggle 'TP On Spawn' to auto-teleport every time your character respawns.",
+})
+
+CoordTab:Input({
+    Title       = "X",
+    Value       = tostring(State.CoordX),
+    InputIcon   = "move-horizontal",
+    Placeholder = "X coordinate",
+    Callback = function(v)
+        local n = tonumber(v)
+        if n then State.CoordX = n end
+    end,
+})
+
+CoordTab:Input({
+    Title       = "Y",
+    Value       = tostring(State.CoordY),
+    InputIcon   = "move-vertical",
+    Placeholder = "Y coordinate",
+    Callback = function(v)
+        local n = tonumber(v)
+        if n then State.CoordY = n end
+    end,
+})
+
+CoordTab:Input({
+    Title       = "Z",
+    Value       = tostring(State.CoordZ),
+    InputIcon   = "move-3d",
+    Placeholder = "Z coordinate",
+    Callback = function(v)
+        local n = tonumber(v)
+        if n then State.CoordZ = n end
+    end,
+})
+
+CoordTab:Button({
+    Title = "TP Now",
+    Desc  = "Teleport instantly to the coordinates above",
+    Callback = function() tpToCoords() end,
+})
+
+CoordTab:Toggle({
+    Title   = "TP On Spawn",
+    Desc    = "Auto-teleport to these coords every time you respawn",
+    Default = false,
+    Callback = function(v) State.TPOnSpawn = v end
+})
+
+CoordTab:Button({
+    Title = "Reset To Default Coords",
+    Desc  = "Restore -27.02, -61.527, -251.831",
+    Callback = function()
+        State.CoordX = -27.02
+        State.CoordY = -61.527
+        State.CoordZ = -251.831
+        w:Notify({ Title = "Coordinates", Content = "Reset to default", Duration = 3 })
+    end,
+})
+
+----------------------------------------------------------------
+-- PLAYER REFRESH
+----------------------------------------------------------------
+ps.PlayerAdded:Connect(function()
+    task.wait(0.5)
+    pcall(function() multiDropdown:Refresh(getPlayerList()) end)
+    pcall(function() lockDropdown:Refresh(getPlayerList()) end)
+end)
+
+ps.PlayerRemoving:Connect(function(p)
+    for i = #State.MultiTargets, 1, -1 do
+        if State.MultiTargets[i] == p.DisplayName then
+            table.remove(State.MultiTargets, i)
+        end
+    end
+    for i = #State.LockTargets, 1, -1 do
+        if State.LockTargets[i] == p.DisplayName then
+            table.remove(State.LockTargets, i)
+        end
+    end
+    if lockOnTarget == p then lockOnTarget = nil end
+    task.wait(0.2)
+    pcall(function() multiDropdown:Refresh(getPlayerList()) end)
+    pcall(function() lockDropdown:Refresh(getPlayerList()) end)
+end)
+
+----------------------------------------------------------------
+-- AUTO-START LOCK ON
+----------------------------------------------------------------
+if State.LockOnEnabled then
+    startLockOn()
+end
+
+print("[RAIN HUB] v2.4 loaded — Lock On whitelist + Coordinates tab.")
